@@ -171,12 +171,28 @@ def matches_filters(job: dict[str, Any], filters: dict[str, Any]) -> bool:
     title_terms = [term.lower() for term in filters.get("titles", []) if term.strip()]
     if title_terms and not any(term in job["title"].lower() for term in title_terms):
         return False
+    countries = [term.lower() for term in filters.get("countries", []) if term.strip()]
+    if countries and not any(term in job["location"].lower() for term in countries):
+        return False
+    cities = [term.lower() for term in filters.get("cities", []) if term.strip()]
+    if cities and not any(term in job["location"].lower() for term in cities):
+        return False
     locations = [term.lower() for term in filters.get("locations", []) if term.strip()]
     if locations and not any(term in job["location"].lower() for term in locations):
         return False
     experience = filters.get("experience_level", "Any")
-    if experience != "Any" and job["experience_level"].lower() != experience.lower():
-        return False
+    if experience != "Any":
+        level = job["experience_level"].lower()
+        title = job["title"].lower()
+        if experience == "Entry-level / Junior / Associate":
+            is_entry = any(term in level for term in ("entry", "junior", "associate", "graduate"))
+            is_entry = is_entry or any(
+                term in title for term in ("junior", "associate", "graduate", "entry level")
+            )
+            if not is_entry:
+                return False
+        elif level != experience.lower():
+            return False
     workplace = filters.get("workplace_type", "Any")
     if workplace != "Any" and job["workplace_type"].lower() != workplace.lower():
         return False

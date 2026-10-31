@@ -31,6 +31,12 @@ from job_agent.db import (
 )
 from job_agent.discovery import discover, matches_filters
 from job_agent.documents import extract_resume_text, save_uploaded_resume, write_documents
+from job_agent.linkedin_discovery import (
+    LinkedInImportError,
+    fetch_gmail_linkedin_alerts,
+    manual_linkedin_job,
+    parse_linkedin_alert_email,
+)
 
 
 load_dotenv(ROOT_DIR / ".env")
@@ -46,6 +52,11 @@ NAV_ITEMS = [
     "Application Tracker",
     "Settings",
 ]
+
+DEFAULT_JOB_TITLES = (
+    "Data Analyst, Cybersecurity Analyst, IAM Analyst, IAM Consultant, "
+    "Junior Data Engineer, Junior Data Scientist, AI/ML Engineer"
+)
 
 
 def _profile() -> dict:
@@ -82,12 +93,108 @@ def _render_jobs_table(jobs: list[dict]) -> None:
     if not jobs:
         st.info("No jobs found yet. Run a discovery search to populate your local tracker.")
         return
-    columns = ["company", "title", "location", "workplace_type", "employment_type", "posted_at", "match_score"]
     st.dataframe(
-        [{key: job.get(key, "") for key in columns} for job in jobs],
+        [
+            {
+                "Source": job.get("source", ""),
+                "Company": job.get("company", ""),
+                "Job title": job.get("title", ""),
+                "Location": job.get("location", ""),
+                "Experience": job.get("experience_level", "Unknown"),
+                "Workplace": job.get("workplace_type", "Unknown"),
+                "Employment": job.get("employment_type", "Unknown"),
+                "Posted": job.get("posted_at", "") or "Unknown",
+                "Resume match": (
+                    f"{job['match_score']}/100"
+                    if job.get("match_score") is not None
+                    else "Pending"
+                ),
+                "URL": job.get("url", ""),
+            }
+            for job in jobs
+        ],
         use_container_width=True,
         hide_index=True,
+        column_config={"URL": st.column_config.LinkColumn("Job posting")},
     )
+
+
+def _auto_match_job(job_id: int, job: dict) -> str:
+    if not job.get("description", "").strip():
+        return "pending"
+    resume_path = _resume_path()
+    if not resume_path or not Path(resume_path).is_file() or not has_openai_api_key():
+        return "pending"
+    try:
+        result = match_job(
+            job["title"],
+            job["company"],
+            job["description"],
+            extract_resume_text(Path(resume_path)),
+            _profile()["profile_text"],
+        )
+        save_match(job_id, result)
+        return "matched"
+    except (AIServiceError, ValueError, OSError) as exc:
+        st.warning(f"Could not match {job['title']} at {job['company']}: {exc}")
+        return "pending"
+
+
+def _save_discovered_jobs(jobs: list[dict]) -> tuple[int, int]:
+    saved = 0
+    matched = 0
+    for job in jobs:
+        job_id = save_job(job)
+        saved += 1
+        if _auto_match_job(job_id, job) == "matched":
+            matched += 1
+    return saved, matched
+
+
+def _visible_jobs(
+    source: str,
+    minimum_score: int,
+    search: str = "",
+    filters: dict | None = None,
+) -> list[dict]:
+    jobs = list_jobs(search)
+    if source != "All Sources":
+        jobs = [job for job in jobs if job["source"].lower() == source.lower()]
+    if filters:
+        jobs = [job for job in jobs if matches_filters(job, filters)]
+    if minimum_score:
+        jobs = [
+            job
+            for job in jobs
+            if job.get("match_score") is not None and job["match_score"] >= minimum_score
+        ]
+    return jobs
+
+
+def _saved_job_filters(settings: dict) -> dict:
+    return {
+        "titles": [
+            item.strip()
+            for item in settings.get("titles", DEFAULT_JOB_TITLES).split(",")
+            if item.strip()
+        ],
+        "countries": [
+            item.strip()
+            for item in settings.get("countries", "Germany").split(",")
+            if item.strip()
+        ],
+        "cities": [
+            item.strip()
+            for item in settings.get("cities", "").split(",")
+            if item.strip()
+        ],
+        "experience_level": settings.get(
+            "experience_level", "Entry-level / Junior / Associate"
+        ),
+        "workplace_type": settings.get("workplace_type", "Any"),
+        "full_time_only": settings.get("full_time_only", True),
+        "posted_within_days": settings.get("posted_within_days"),
+    }
 
 
 def overview_page() -> None:
@@ -106,18 +213,26 @@ def overview_page() -> None:
 
 def discovery_page() -> None:
     st.title("Job Discovery")
-    st.caption("Search authorized public Greenhouse and Lever job-board APIs. No login, scraping, or anti-bot controls are bypassed.")
+    st.caption("Use public Greenhouse/Lever feeds or import your own LinkedIn job-alert email. LinkedIn is never scraped or logged into.")
     settings = get_setting("discovery_settings", {})
+    source = st.selectbox(
+        "Job Source",
+        ["All Sources", "LinkedIn", "Greenhouse", "Lever"],
+        key="job_discovery_source",
+    )
+    minimum_score = st.slider("Minimum resume match score", 0, 100, 0, 5)
     with st.form("discovery"):
-        left, right = st.columns(2)
+        left, right, third = st.columns(3)
         titles_text = left.text_input(
             "Job titles (comma-separated)",
-            settings.get("titles", "Data Analyst, Business Intelligence Analyst, Data Engineer, Cybersecurity Analyst, IAM Analyst, IAM Consultant, Junior Data Scientist, Junior AI/ML Engineer"),
+            settings.get("titles", DEFAULT_JOB_TITLES),
         )
-        locations_text = right.text_input(
-            "Locations (comma-separated)",
-            settings.get("locations", "Germany, Dubai, Netherlands, Austria, Switzerland, France, Ireland, Europe"),
+        country_text = right.text_input(
+            "Country / countries",
+            settings.get("countries", "Germany"),
+            help="Separate multiple countries with commas.",
         )
+        city_text = third.text_input("City / cities", settings.get("cities", ""))
         boards_text = left.text_input(
             "Greenhouse board slugs (company-provided)",
             settings.get("greenhouse_boards", ""),
@@ -129,15 +244,37 @@ def discovery_page() -> None:
             help="Use the public site name from a company's Lever careers URL.",
         )
         c1, c2, c3 = st.columns(3)
-        experience = c1.selectbox("Experience level", ["Any", "Entry level", "Internship", "Senior", "Unknown"])
+        experience_options = [
+            "Any",
+            "Entry-level / Junior / Associate",
+            "Entry level",
+            "Internship",
+            "Senior",
+            "Unknown",
+        ]
+        preferred_experience = settings.get(
+            "experience_level", "Entry-level / Junior / Associate"
+        )
+        experience = c1.selectbox(
+            "Experience level",
+            experience_options,
+            index=(
+                experience_options.index(preferred_experience)
+                if preferred_experience in experience_options
+                else 1
+            ),
+        )
         workplace = c2.selectbox("Workplace", ["Any", "Remote", "Hybrid", "Onsite"])
         posted_days = c3.selectbox("Date posted", ["Any", "7 days", "14 days", "30 days"])
-        full_time = st.checkbox("Full-time only")
+        full_time = st.checkbox(
+            "Full-time only", value=settings.get("full_time_only", True)
+        )
         searched = st.form_submit_button("Discover jobs", type="primary")
     if searched:
         discovery_settings = {
             "titles": titles_text,
-            "locations": locations_text,
+            "countries": country_text,
+            "cities": city_text,
             "greenhouse_boards": boards_text,
             "lever_sites": lever_text,
             "experience_level": experience,
@@ -146,32 +283,126 @@ def discovery_page() -> None:
             "posted_within_days": int(posted_days.split()[0]) if posted_days != "Any" else None,
         }
         set_setting("discovery_settings", discovery_settings)
-        filters = {
-            "titles": [value.strip() for value in titles_text.split(",")],
-            "locations": [value.strip() for value in locations_text.split(",")],
-            "experience_level": discovery_settings["experience_level"],
-            "workplace_type": discovery_settings["workplace_type"],
-            "full_time_only": discovery_settings["full_time_only"],
-            "posted_within_days": discovery_settings["posted_within_days"],
-        }
-        with st.spinner("Querying public job-board APIs..."):
-            found, errors = discover(
-                [value.strip() for value in boards_text.split(",") if value.strip()],
-                [value.strip() for value in lever_text.split(",") if value.strip()],
+        filters = _saved_job_filters(discovery_settings)
+        if source == "LinkedIn":
+            st.info("Import LinkedIn job alerts or a job URL below. LinkedIn listings are not scraped.")
+        else:
+            greenhouse = (
+                [value.strip() for value in boards_text.split(",") if value.strip()]
+                if source in {"All Sources", "Greenhouse"}
+                else []
             )
-        visible = [job for job in found if matches_filters(job, filters)]
-        saved = 0
-        for job in visible:
-            save_job(job)
-            saved += 1
-        st.success(f"Received {len(found)} listing(s); {saved} matched your filters and were saved or updated.")
-        for error in errors:
-            st.warning(error)
-        if not boards_text.strip() and not lever_text.strip():
-            st.info("Add at least one public Greenhouse board slug or Lever site name in Settings or above.")
+            lever = (
+                [value.strip() for value in lever_text.split(",") if value.strip()]
+                if source in {"All Sources", "Lever"}
+                else []
+            )
+            with st.spinner("Querying public job-board APIs..."):
+                found, errors = discover(greenhouse, lever)
+            filtered = [job for job in found if matches_filters(job, filters)]
+            saved, matched = _save_discovered_jobs(filtered)
+            st.success(
+                f"Received {len(found)} listing(s); saved or updated {saved}; "
+                f"matched against your resume {matched}."
+            )
+            for error in errors:
+                st.warning(error)
+            if not greenhouse and not lever:
+                st.info("Add at least one public Greenhouse board slug or Lever site name.")
+
+    st.subheader("Import LinkedIn job alerts")
+    st.caption("Import only emails in a mailbox you are authorized to access. Credentials are used for this request only and are not saved.")
+    with st.expander("Import an exported LinkedIn alert (.eml)"):
+        alert_file = st.file_uploader("LinkedIn job-alert email", type=["eml"], key="linkedin_eml")
+        if alert_file and st.button("Import jobs from email", key="import_linkedin_eml"):
+            try:
+                imported = parse_linkedin_alert_email(alert_file.getvalue())
+                saved, _ = _save_discovered_jobs(imported)
+                st.success(f"Imported or updated {saved} LinkedIn job(s). Listings without descriptions have Pending match scores.")
+                if not imported:
+                    st.info("No direct LinkedIn /jobs/view/ links were found in this email.")
+            except (ValueError, OSError) as exc:
+                st.error(str(exc))
+
+    with st.expander("Import recent alerts from Gmail over read-only IMAP"):
+        st.caption("Requires IMAP access and a Gmail app password. This reads the inbox without marking messages as read. Streamlit Cloud network policy may block IMAP access.")
+        with st.form("linkedin_gmail_import"):
+            gmail_user = st.text_input("Gmail address")
+            gmail_password = st.text_input("Gmail app password", type="password")
+            email_limit = st.selectbox("Maximum recent emails to read", [10, 20, 50, 100], index=1)
+            import_gmail = st.form_submit_button("Read LinkedIn alerts")
+        if import_gmail:
+            try:
+                with st.spinner("Reading recent LinkedIn alerts in read-only mode..."):
+                    imported = fetch_gmail_linkedin_alerts(
+                        gmail_user, gmail_password, email_limit
+                    )
+                saved, _ = _save_discovered_jobs(imported)
+                st.success(f"Imported or updated {saved} LinkedIn job(s).")
+                if not imported:
+                    st.info("No job links were extracted from recent LinkedIn alert emails.")
+            except (LinkedInImportError, ValueError) as exc:
+                st.error(str(exc))
+
+    with st.expander("Add a LinkedIn job URL and details manually"):
+        with st.form("linkedin_manual_job"):
+            manual_url = st.text_input("LinkedIn job URL")
+            manual_title = st.text_input("Job title")
+            manual_company = st.text_input("Company")
+            manual_location = st.text_input("Location")
+            manual_description = st.text_area(
+                "Job description (optional; match remains pending if omitted)",
+                max_chars=50000,
+            )
+            manual_has_posted = st.checkbox("I know the posting date")
+            manual_posted = (
+                st.date_input("Posting date") if manual_has_posted else None
+            )
+            manual_saved = st.form_submit_button("Save LinkedIn job")
+        if manual_saved:
+            try:
+                job = manual_linkedin_job(
+                    manual_url,
+                    manual_title,
+                    manual_company,
+                    manual_location,
+                    manual_description,
+                    manual_posted.isoformat() if manual_posted else "",
+                )
+                _save_discovered_jobs([job])
+                st.success("LinkedIn job saved. Its resume match is available when a description, resume, and API key are provided.")
+            except (ValueError, OSError) as exc:
+                st.error(str(exc))
+
     st.subheader("Saved jobs")
     query = st.text_input("Search saved jobs", key="saved_jobs_query")
-    _render_jobs_table(list_jobs(query))
+    active_filters = _saved_job_filters(get_setting("discovery_settings", {}))
+    all_saved = [
+        job for job in list_jobs(query) if matches_filters(job, active_filters)
+    ]
+    eligible_unmatched = [
+        job
+        for job in all_saved
+        if job.get("match_score") is None and job.get("description", "").strip()
+    ]
+    if eligible_unmatched and st.button(
+        f"Match {len(eligible_unmatched)} eligible saved job(s) against my resume"
+    ):
+        matched_count = 0
+        with st.spinner("Matching saved jobs with available descriptions..."):
+            for job in eligible_unmatched:
+                matched_count += _auto_match_job(job["id"], job) == "matched"
+        st.success(f"Completed {matched_count} match(es); jobs without a score remain Pending.")
+        all_saved = list_jobs(query)
+    if minimum_score:
+        pending_count = sum(job.get("match_score") is None for job in all_saved)
+        st.caption(
+            f"Showing only jobs with a match score of at least {minimum_score}. "
+            f"{pending_count} job(s) with pending scores are excluded."
+        )
+    _render_jobs_table(
+        _visible_jobs(source, minimum_score, query, active_filters)
+    )
 
 
 def matching_page() -> None:
@@ -184,6 +415,9 @@ def matching_page() -> None:
     chosen = st.selectbox("Select a job", jobs, format_func=_job_label, key="match_job")
     if st.button("Analyze job fit", type="primary"):
         try:
+            if not chosen["description"].strip():
+                st.warning("Match pending: this job has no description. Add the description before analyzing fit.")
+                return
             with st.spinner("Comparing the job description with your resume..."):
                 result = match_job(
                     chosen["title"],

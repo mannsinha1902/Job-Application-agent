@@ -20,7 +20,8 @@ def main() -> None:
     jobs, errors = discover(greenhouse, lever)
     filters = {
         "titles": [item.strip() for item in settings.get("titles", "").split(",") if item.strip()],
-        "locations": [item.strip() for item in settings.get("locations", "").split(",") if item.strip()],
+        "countries": [item.strip() for item in settings.get("countries", "Germany").split(",") if item.strip()],
+        "cities": [item.strip() for item in settings.get("cities", "").split(",") if item.strip()],
         "experience_level": settings.get("experience_level", "Any"),
         "workplace_type": settings.get("workplace_type", "Any"),
         "full_time_only": settings.get("full_time_only", False),

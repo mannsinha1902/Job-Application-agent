@@ -81,6 +81,12 @@ def match_job(
     resume_text: str,
     profile_text: str = PROFILE_DEFAULT,
 ) -> dict[str, Any]:
+    if not description.strip():
+        raise AIServiceError(
+            "A job description is required for a reliable resume match; the score remains pending."
+        )
+    if not resume_text.strip():
+        raise AIServiceError("Upload a readable resume before requesting a job match.")
     result = _json_completion(
         f"""Compare the candidate to this job. Score fit on a transparent 0-100 rubric,
 not the probability of getting hired. Explain evidence and uncertainty. Use only facts stated below.

@@ -83,7 +83,9 @@ def save_job(job: dict[str, Any], database_path: Path | None = None) -> int:
             VALUES
                 (:source, :external_id, :company, :title, :location, :url, :description,
                  :posted_at, :experience_level, :workplace_type, :employment_type)
-            ON CONFLICT(source, external_id) DO UPDATE SET
+            ON CONFLICT(url) DO UPDATE SET
+                source = excluded.source,
+                external_id = excluded.external_id,
                 company = excluded.company,
                 title = excluded.title,
                 location = excluded.location,
@@ -97,11 +99,13 @@ def save_job(job: dict[str, Any], database_path: Path | None = None) -> int:
             job,
         )
         row = connection.execute(
-            "SELECT id FROM jobs WHERE source = ? AND external_id = ?",
-            (job["source"], job["external_id"]),
+            "SELECT id FROM jobs WHERE url = ?",
+            (job["url"],),
         ).fetchone()
         if row is None:
             raise RuntimeError("The job could not be saved to the database.")
+        if not job["description"].strip():
+            connection.execute("DELETE FROM matches WHERE job_id = ?", (row["id"],))
         return int(row["id"])
 
 
@@ -111,7 +115,8 @@ def list_jobs(
 ) -> list[dict[str, Any]]:
     query = """
         SELECT jobs.*, matches.score AS match_score,
-               matches.result_json AS match_result
+               matches.result_json AS match_result,
+               CASE WHEN matches.job_id IS NULL THEN 'Pending' ELSE 'Matched' END AS match_status
         FROM jobs LEFT JOIN matches ON jobs.id = matches.job_id
     """
     params: tuple[str, ...] = ()

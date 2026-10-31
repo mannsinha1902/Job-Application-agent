@@ -59,3 +59,30 @@ def test_board_names_are_validated_before_request():
         assert "site names" in str(exc)
     else:
         raise AssertionError("Invalid board name was accepted.")
+
+
+def test_filters_support_country_city_and_entry_level_preferences():
+    job = {
+        "title": "Junior IAM Analyst",
+        "location": "Berlin, Germany",
+        "experience_level": "Entry level",
+        "workplace_type": "Hybrid",
+        "employment_type": "Full-time",
+        "posted_at": "2026-10-30",
+    }
+    assert matches_filters(
+        job,
+        {
+            "titles": ["IAM Analyst"],
+            "countries": ["Germany"],
+            "cities": ["Berlin"],
+            "experience_level": "Entry-level / Junior / Associate",
+            "workplace_type": "Hybrid",
+            "full_time_only": True,
+            "posted_within_days": None,
+        },
+    )
+    assert not matches_filters(
+        job,
+        {"countries": ["Germany"], "cities": ["Munich"]},
+    )

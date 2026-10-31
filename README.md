@@ -34,7 +34,7 @@ Alternatively, run `streamlit run app.py` after activating your virtual environm
 
 ## Privacy and limitations
 
-SQLite data, resumes, generated documents, and temporary browser manifests live under `data\` by default and are excluded from Git. API keys belong in the ignored `.env`; keys are not stored in SQLite or logged. Streamlit binds to `127.0.0.1` by default so the dashboard is local-only. Do not upload sensitive information you do not want sent to OpenAI. AI features send the provided resume text and job description to the OpenAI API when invoked.
+SQLite data, resumes, generated documents, and temporary browser manifests live under `data\` by default and are excluded from Git. API keys belong in the ignored `.env` for local use, or in **App settings → Secrets** when deployed to Streamlit Community Cloud. Cloud secrets should use TOML syntax such as `OPENAI_API_KEY = "sk-..."`. Keys are not stored in SQLite or logged. Streamlit binds to `127.0.0.1` by default so the local dashboard is local-only. Do not upload sensitive information you do not want sent to OpenAI. AI features send the provided resume text and job description to the OpenAI API when invoked.
 
 The public feeds expose different fields; experience, work arrangement, and employment type can be unknown. The Greenhouse feed used here does not provide a reliable original posting date, so those listings are treated as undated and excluded when a posted-date filter is active. Feed access and browser form compatibility depend on external providers and must be checked manually. Some PDFs (for example scanned image-only documents) may not contain extractable text. Playwright's browser binary is installed separately using the command above.
 

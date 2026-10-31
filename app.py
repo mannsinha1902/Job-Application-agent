@@ -12,6 +12,7 @@ from job_agent.ai import (
     AIServiceError,
     PROFILE_DEFAULT,
     generate_documents,
+    has_openai_api_key,
     match_job,
 )
 from job_agent.automation import launch_prepared_application
@@ -426,7 +427,7 @@ def settings_page() -> None:
         st.success("Profile saved locally.")
 
     st.subheader("OpenAI API")
-    st.write("API key status:", "Configured" if os.getenv("OPENAI_API_KEY") else "Not configured")
+    st.write("API key status:", "Configured" if has_openai_api_key() else "Not configured")
     with st.form("api_key"):
         key_value = st.text_input("OpenAI API key", type="password", help="Never stored in SQLite or displayed after saving.")
         model = st.text_input("OpenAI model", value=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))

@@ -5,6 +5,7 @@ import os
 from typing import Any
 
 from openai import OpenAI
+from streamlit.errors import StreamlitSecretNotFoundError
 
 
 class AIServiceError(RuntimeError):
@@ -17,12 +18,31 @@ Six months as a Data Engineering Intern at Razorpay. Skills: Python, SQL, Power 
 machine learning, SailPoint, Azure AD, and Okta."""
 
 
+def has_openai_api_key() -> bool:
+    if os.getenv("OPENAI_API_KEY"):
+        return True
+    try:
+        import streamlit as st
+
+        return bool(st.secrets.get("OPENAI_API_KEY", ""))
+    except StreamlitSecretNotFoundError:
+        return False
+
+
 def _client() -> OpenAI:
-    if not os.getenv("OPENAI_API_KEY"):
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        try:
+            import streamlit as st
+
+            api_key = st.secrets.get("OPENAI_API_KEY", "")
+        except StreamlitSecretNotFoundError:
+            api_key = ""
+    if not api_key:
         raise AIServiceError(
-            "Set OPENAI_API_KEY in Settings or the local .env file before using AI features."
+            "Set OPENAI_API_KEY in Streamlit Cloud Secrets, Settings, or the local .env file before using AI features."
         )
-    return OpenAI()
+    return OpenAI(api_key=api_key)
 
 
 def _json_completion(prompt: str, model: str | None = None) -> dict[str, Any]:
@@ -128,4 +148,3 @@ Job description:
     if missing:
         raise AIServiceError(f"The AI response is missing document fields: {', '.join(missing)}")
     return result
-
